@@ -112,6 +112,39 @@ fn generate_value(
           buf.push_str(&format!("  xor {}, {}, {}\n", reg, lhs_reg, rhs_reg));
           buf.push_str(&format!("  seqz {}, {}\n", reg, reg));
         }
+        BinaryOp::NotEq => {
+          buf.push_str(&format!("  xor {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+          buf.push_str(&format!("  snez {}, {}\n", reg, reg));
+        }
+        BinaryOp::Lt => {
+          buf.push_str(&format!("  slt {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+        }
+        BinaryOp::Gt => {
+          buf.push_str(&format!("  slt {}, {}, {}\n", reg, rhs_reg, lhs_reg));
+        }
+        BinaryOp::Le => {
+          buf.push_str(&format!("  slt {}, {}, {}\n", reg, rhs_reg, lhs_reg));
+          buf.push_str(&format!("  xori {}, {}, 1\n", reg, reg));
+        }
+        BinaryOp::Ge => {
+          buf.push_str(&format!("  slt {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+          buf.push_str(&format!("  xori {}, {}, 1\n", reg, reg));
+        }
+        BinaryOp::And => {
+          // 先布尔化两个操作数(非零→1), 再按位与
+          let lhs_bool = REGS[*next_reg].to_string();
+          *next_reg += 1;
+          buf.push_str(&format!("  snez {}, {}\n", lhs_bool, lhs_reg));
+          let rhs_bool = REGS[*next_reg].to_string();
+          *next_reg += 1;
+          buf.push_str(&format!("  snez {}, {}\n", rhs_bool, rhs_reg));
+          buf.push_str(&format!("  and {}, {}, {}\n", reg, lhs_bool, rhs_bool));
+        }
+        BinaryOp::Or => {
+          // 按位或合并所有位, 再布尔化结果
+          buf.push_str(&format!("  or {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+          buf.push_str(&format!("  snez {}, {}\n", reg, reg));
+        }
         _ => {}
       }
     }

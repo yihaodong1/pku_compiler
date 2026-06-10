@@ -71,11 +71,11 @@ impl Stmt {
 
 #[derive(Debug)]
 pub struct Exp{
-    pub addexp: AddExp,
+    pub lorexp: LOrExp,
 }
 impl Exp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value {
-        self.addexp.convert_to_koopa_ir(func_data, entry)
+        self.lorexp.convert_to_koopa_ir(func_data, entry)
     }
 }
 
@@ -195,4 +195,114 @@ impl MulExp{
     }
 }
 
-// ...
+#[derive(Debug)]
+pub enum RelExp{
+    Add(AddExp),
+    Lt(Box<RelExp>, AddExp),
+    Gt(Box<RelExp>, AddExp),
+    Le(Box<RelExp>, AddExp),
+    Ge(Box<RelExp>, AddExp),
+}
+impl RelExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            RelExp::Add(add) => add.convert_to_koopa_ir(func_data, entry),
+            RelExp::Lt(rel, add) => {
+                let lhs = rel.convert_to_koopa_ir(func_data, entry);
+                let rhs = add.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Lt, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+            RelExp::Gt(rel, add) => {
+                let lhs = rel.convert_to_koopa_ir(func_data, entry);
+                let rhs = add.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Gt, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+            RelExp::Le(rel, add) => {
+                let lhs = rel.convert_to_koopa_ir(func_data, entry);
+                let rhs = add.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Le, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+            RelExp::Ge(rel, add) => {
+                let lhs = rel.convert_to_koopa_ir(func_data, entry);
+                let rhs = add.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Ge, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum EqExp{
+    Rel(RelExp),
+    Eq(Box<EqExp>, RelExp),
+    Ne(Box<EqExp>, RelExp),
+}
+impl EqExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            EqExp::Rel(rel) => rel.convert_to_koopa_ir(func_data, entry),
+            EqExp::Eq(eq, rel) => {
+                let lhs = eq.convert_to_koopa_ir(func_data, entry);
+                let rhs = rel.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Eq, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+            EqExp::Ne(eq, rel) => {
+                let lhs = eq.convert_to_koopa_ir(func_data, entry);
+                let rhs = rel.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::NotEq, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LAndExp{
+    Eq(EqExp),
+    And(Box<LAndExp>, EqExp),
+}
+impl LAndExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            LAndExp::Eq(eq) => eq.convert_to_koopa_ir(func_data, entry),
+            LAndExp::And(land, eq) => {
+                let lhs = land.convert_to_koopa_ir(func_data, entry);
+                let rhs = eq.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::And, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum LOrExp{
+    And(LAndExp),
+    Or(Box<LOrExp>, LAndExp),
+}
+impl LOrExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            LOrExp::And(land) => land.convert_to_koopa_ir(func_data, entry),
+            LOrExp::Or(lor, land) => {
+                let lhs = lor.convert_to_koopa_ir(func_data, entry);
+                let rhs = land.convert_to_koopa_ir(func_data, entry);
+                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Or, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                v
+            },
+        }
+    }
+}

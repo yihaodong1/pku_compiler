@@ -1,6 +1,6 @@
 use crate::ast::{CompUnit,FuncDef,FuncType,Block
 ,Stmt,Exp,UnaryExp,UnaryOp,PrimaryExp,
-AddExp,MulExp};
+AddExp,MulExp,RelExp,EqExp,LAndExp,LOrExp};
 // lalrpop 里的约定
 grammar;
 
@@ -27,7 +27,7 @@ Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
 
 Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
 
-Exp: Exp = <addexp: AddExp> => Exp{ <> };
+Exp: Exp = <lorexp: LOrExp> => Exp{ <> };
 
 UnaryExp: UnaryExp = {
   <primaryexp: PrimaryExp> => UnaryExp::Primary(<>),
@@ -64,6 +64,37 @@ MulExp: MulExp = {
   <mulexp: MulExp> "%" <unaryexp: UnaryExp> => 
   MulExp::Mod(Box::new(mulexp), unaryexp),
 
+}
+RelExp: RelExp = {
+  <addexp: AddExp> => RelExp::Add(<>),
+  <relexp: RelExp> "<" <addexp: AddExp> =>
+    RelExp::Lt(Box::new(relexp), addexp),
+  <relexp: RelExp> ">" <addexp: AddExp> =>
+    RelExp::Gt(Box::new(relexp), addexp),
+  <relexp: RelExp> "<=" <addexp: AddExp> =>
+    RelExp::Le(Box::new(relexp), addexp),
+  <relexp: RelExp> ">=" <addexp: AddExp> =>
+    RelExp::Ge(Box::new(relexp), addexp),
+}
+
+EqExp: EqExp = {
+  <relexp: RelExp> => EqExp::Rel(<>),
+  <eqexp: EqExp> "==" <relexp: RelExp> =>
+    EqExp::Eq(Box::new(eqexp), relexp),
+  <eqexp: EqExp> "!=" <relexp: RelExp> =>
+    EqExp::Ne(Box::new(eqexp), relexp),
+}
+
+LAndExp: LAndExp = {
+  <eqexp: EqExp> => LAndExp::Eq(<>),
+  <landexp: LAndExp> "&&" <eqexp: EqExp> =>
+    LAndExp::And(Box::new(landexp), eqexp),
+}
+
+LOrExp: LOrExp = {
+  <landexp: LAndExp> => LOrExp::And(<>),
+  <lorexp: LOrExp> "||" <landexp: LAndExp> =>
+    LOrExp::Or(Box::new(lorexp), landexp),
 }
 
 Number: i32 = <num: IntConst> => <>;
