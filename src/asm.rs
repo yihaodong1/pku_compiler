@@ -99,6 +99,15 @@ fn generate_value(
         BinaryOp::Sub => {
           buf.push_str(&format!("  sub {}, {}, {}\n", reg, lhs_reg, rhs_reg));
         }
+        BinaryOp::Mul => {
+          buf.push_str(&format!("  mul {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+        }
+        BinaryOp::Div => {
+          buf.push_str(&format!("  div {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+        }
+        BinaryOp::Mod => {
+          buf.push_str(&format!("  rem {}, {}, {}\n", reg, lhs_reg, rhs_reg));
+        }
         BinaryOp::Eq => {
           buf.push_str(&format!("  xor {}, {}, {}\n", reg, lhs_reg, rhs_reg));
           buf.push_str(&format!("  seqz {}, {}\n", reg, reg));

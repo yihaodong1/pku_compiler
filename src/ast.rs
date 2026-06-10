@@ -71,11 +71,11 @@ impl Stmt {
 
 #[derive(Debug)]
 pub struct Exp{
-    pub unaryexp: UnaryExp,
+    pub addexp: AddExp,
 }
 impl Exp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value {
-        self.unaryexp.convert_to_koopa_ir(func_data, entry)
+        self.addexp.convert_to_koopa_ir(func_data, entry)
     }
 }
 
@@ -91,8 +91,8 @@ impl UnaryExp {
             UnaryExp::Unary(op, unary) => {
                 let val = unary.convert_to_koopa_ir(func_data, entry);
                 match op {
-                    UnaryOp::Add => val,
-                    UnaryOp::Sub => {
+                    UnaryOp::Pos => val,
+                    UnaryOp::Neg => {
                         let zero = func_data.dfg_mut().new_value().integer(0);
                         let sub = func_data.dfg_mut().new_value().binary(BinaryOp::Sub, zero, val);
                         let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(sub);
@@ -112,8 +112,8 @@ impl UnaryExp {
 
 #[derive(Debug)]
 pub enum UnaryOp{
-    Add,
-    Sub,
+    Pos,
+    Neg,
     Not
 }
 
@@ -127,6 +127,70 @@ impl PrimaryExp {
         match self {
             PrimaryExp::Exp(exp) => exp.convert_to_koopa_ir(func_data, entry),
             PrimaryExp::Number(n) => func_data.dfg_mut().new_value().integer(*n),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum AddExp{
+    Mul(MulExp),
+    Add(Box<AddExp>, MulExp),
+    Sub(Box<AddExp>, MulExp),
+}
+impl AddExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            AddExp::Mul(mul) => mul.convert_to_koopa_ir(func_data, entry),
+            AddExp::Add(add,mul ) =>{
+                let lhs = add.convert_to_koopa_ir(func_data, entry);
+                let rhs = mul.convert_to_koopa_ir(func_data, entry);
+                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Add, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                eq
+            },
+            AddExp::Sub(add,mul ) =>{
+                let lhs = add.convert_to_koopa_ir(func_data, entry);
+                let rhs = mul.convert_to_koopa_ir(func_data, entry);
+                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Sub, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                eq
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum MulExp{
+    Unary(UnaryExp),
+    Mul(Box<MulExp>, UnaryExp),
+    Div(Box<MulExp>, UnaryExp),
+    Mod(Box<MulExp>, UnaryExp),
+}
+impl MulExp{
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value{
+        match self {
+            MulExp::Unary(unaryexp) => unaryexp.convert_to_koopa_ir(func_data, entry),
+            MulExp::Mul(mul, unaryexp) => {
+                let lhs = mul.convert_to_koopa_ir(func_data, entry);
+                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry);
+                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Mul, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                eq
+            },
+            MulExp::Div(mul, unaryexp) => {
+                let lhs = mul.convert_to_koopa_ir(func_data, entry);
+                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry);
+                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Div, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                eq
+            },
+            MulExp::Mod(mul, unaryexp) => {
+                let lhs = mul.convert_to_koopa_ir(func_data, entry);
+                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry);
+                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Mod, lhs, rhs);
+                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                eq
+            }
         }
     }
 }
