@@ -59,13 +59,76 @@ impl Block {
 
 #[derive(Debug)]
 pub struct Stmt {
-  pub num: i32,
+  pub exp: Exp,
 }
 impl Stmt {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: koopa::ir::BasicBlock){
-        let num = func_data.dfg_mut().new_value().integer(self.num);
-        let ret = func_data.dfg_mut().new_value().ret(Some(num));
+        let value = self.exp.convert_to_koopa_ir(func_data, entry);
+        let ret = func_data.dfg_mut().new_value().ret(Some(value));
         let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(ret);
     }
 }
+
+#[derive(Debug)]
+pub struct Exp{
+    pub unaryexp: UnaryExp,
+}
+impl Exp {
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value {
+        self.unaryexp.convert_to_koopa_ir(func_data, entry)
+    }
+}
+
+#[derive(Debug)]
+pub enum UnaryExp{
+    Primary(PrimaryExp),
+    Unary(UnaryOp, Box<UnaryExp>),
+}
+impl UnaryExp {
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value {
+        match self {
+            UnaryExp::Primary(primary) => primary.convert_to_koopa_ir(func_data, entry),
+            UnaryExp::Unary(op, unary) => {
+                let val = unary.convert_to_koopa_ir(func_data, entry);
+                match op {
+                    UnaryOp::Add => val,
+                    UnaryOp::Sub => {
+                        let zero = func_data.dfg_mut().new_value().integer(0);
+                        let sub = func_data.dfg_mut().new_value().binary(BinaryOp::Sub, zero, val);
+                        let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(sub);
+                        sub
+                    },
+                    UnaryOp::Not => {
+                        let zero = func_data.dfg_mut().new_value().integer(0);
+                        let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Eq, val, zero);
+                        let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
+                        eq
+                    },
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum UnaryOp{
+    Add,
+    Sub,
+    Not
+}
+
+#[derive(Debug)]
+pub enum PrimaryExp{
+    Exp(Box<Exp>),
+    Number(i32),
+}
+impl PrimaryExp {
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock) -> Value {
+        match self {
+            PrimaryExp::Exp(exp) => exp.convert_to_koopa_ir(func_data, entry),
+            PrimaryExp::Number(n) => func_data.dfg_mut().new_value().integer(*n),
+        }
+    }
+}
+
 // ...

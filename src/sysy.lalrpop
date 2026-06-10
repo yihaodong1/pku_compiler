@@ -1,4 +1,4 @@
-use crate::ast::{CompUnit,FuncDef,FuncType,Block,Stmt};
+use crate::ast::{CompUnit,FuncDef,FuncType,Block,Stmt,Exp,UnaryExp,UnaryOp,PrimaryExp};
 // lalrpop 里的约定
 grammar;
 
@@ -23,7 +23,25 @@ FuncType: FuncType = "int" => FuncType::Int;
 
 Block: Block = "{" <stmt: Stmt> "}" => Block { <> };
 
-Stmt: Stmt = "return" <num: Number> ";" => Stmt { <> };
+Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
+
+Exp: Exp = <unaryexp: UnaryExp> => Exp{ <> };
+
+UnaryExp: UnaryExp = {
+  <primaryexp: PrimaryExp> => UnaryExp::Primary(<>),
+  <unaryop: UnaryOp> <unaryexp: UnaryExp> => UnaryExp::Unary(unaryop, Box::new(unaryexp)),
+}
+
+UnaryOp : UnaryOp = { 
+  "+"=>UnaryOp::Add,
+  "-"=>UnaryOp::Sub,
+  "!"=>UnaryOp::Not
+}
+
+PrimaryExp : PrimaryExp = {
+  "(" <exp: Exp> ")" => PrimaryExp::Exp(Box::new(exp)),
+  <num:Number> => PrimaryExp::Number(<>),
+}
 
 Number: i32 = <num: IntConst> => <>;
 
