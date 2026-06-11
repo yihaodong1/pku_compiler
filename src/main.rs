@@ -25,7 +25,7 @@ fn main() -> Result<()> {
   let input = read_to_string(input)?;
 
   // 调用 lalrpop 生成的 parser 解析输入文件
-  let ast = sysy::CompUnitParser::new().parse(&input).unwrap();
+  let mut ast = sysy::CompUnitParser::new().parse(&input).unwrap();
 
   // 输出解析得到的 AST
   // println!("{:#?}", ast);

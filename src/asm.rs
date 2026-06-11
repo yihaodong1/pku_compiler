@@ -38,11 +38,23 @@ impl GenerateAsm for FunctionData {
   }
 }
 
+fn new_temp(next_reg: &mut usize) -> String {
+  if *next_reg >= REGS.len() {
+    panic!("register exhausted: need more than {} regs", REGS.len() - 1);
+  }
+  let reg = REGS[*next_reg].to_string();
+  *next_reg += 1;
+  reg
+}
+
 fn alloc_reg(
   value: Value,
   reg_map: &mut HashMap<Value, String>,
   next_reg: &mut usize,
 ) -> String {
+  if *next_reg >= REGS.len() {
+    panic!("register exhausted: need more than {} regs", REGS.len() - 1);
+  }
   let reg = REGS[*next_reg].to_string();
   *next_reg += 1;
   reg_map.insert(value, reg.clone());
@@ -132,11 +144,9 @@ fn generate_value(
         }
         BinaryOp::And => {
           // 先布尔化两个操作数(非零→1), 再按位与
-          let lhs_bool = REGS[*next_reg].to_string();
-          *next_reg += 1;
+          let lhs_bool = new_temp(next_reg);
           buf.push_str(&format!("  snez {}, {}\n", lhs_bool, lhs_reg));
-          let rhs_bool = REGS[*next_reg].to_string();
-          *next_reg += 1;
+          let rhs_bool = new_temp(next_reg);
           buf.push_str(&format!("  snez {}, {}\n", rhs_bool, rhs_reg));
           buf.push_str(&format!("  and {}, {}, {}\n", reg, lhs_bool, rhs_bool));
         }
