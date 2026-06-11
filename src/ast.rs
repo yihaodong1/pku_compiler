@@ -26,7 +26,7 @@ pub struct FuncDef {
 #[derive(Debug)]
 pub enum ValInfo{
     Const(i32),
-    Var(Value)
+    Var(Value, Option<i32>)
 }
 impl FuncDef {
     fn convert_to_koopa_ir(&mut self, program: &mut Program){
@@ -106,7 +106,7 @@ impl ConstDecl {
     fn convert_to_koopa_ir(&self, symtable: &mut HashMap<String, ValInfo>) {
         for def in &self.defs {
             let val = def.init_val.evaluate(symtable);
-            symtable.insert(def.ident.clone(), ValInfo::Const(val.unwrap()));
+            symtable.insert(def.ident.clone(), ValInfo::Const(val.unwrap().unwrap()));
         }
     }
 }
@@ -123,7 +123,7 @@ pub enum ConstInitVal {
 }
 impl ConstInitVal {
     fn evaluate(&self, symtable: &HashMap<String, ValInfo>) 
-    -> Result<i32, &'static str> {
+    -> Result<Option<i32>, &'static str> {
         match self {
             ConstInitVal::Exp(exp) => exp.evaluate(symtable),
         }
@@ -136,7 +136,7 @@ pub struct ConstExp {
 }
 impl ConstExp {
     fn evaluate(&self, symtable: &HashMap<String, ValInfo>) 
-    -> Result<i32, &'static str> {
+    -> Result<Option<i32>, &'static str> {
         self.exp.evaluate(symtable)
     }
 }
@@ -155,21 +155,26 @@ impl VarDecl {
             let alloc = func_data.dfg_mut().new_value().alloc(ty);
             let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(alloc);
             
-            let name = match def{
-                VarDef::IDENT(name)=>{name},
+            match def{
+                VarDef::IDENT(name)=>{
+                    if symtable.get(name).is_none(){
+                        symtable.insert(name.clone(), ValInfo::Var(alloc,None));
+                    }else{
+                        panic!("repeat declare");
+                    }
+                },
                 VarDef::IDENTInitVal(name,initval )=>{
-                    let val = initval.evaluate(symtable).unwrap();
+                    let val = initval.evaluate(symtable).unwrap().unwrap();
                     let value = func_data.dfg_mut().new_value().integer(val);
                     let store = func_data.dfg_mut().new_value().store(value, alloc);
                     let _ = func_data.layout_mut().bb_mut(entry).
                         insts_mut().push_key_back(store);
-                    name
+                    if symtable.get(name).is_none(){
+                        symtable.insert(name.clone(), ValInfo::Var(alloc,Some(val)));
+                    }else{
+                        panic!("repeat declare");
+                    }
                 }
-            };
-            if symtable.get(name).is_none(){
-                symtable.insert(name.clone(), ValInfo::Var(alloc));
-            }else{
-                panic!("repeat declare");
             }
         }
     }
@@ -186,7 +191,7 @@ pub struct InitVal {
     pub exp: Exp,
 }
 impl InitVal {
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         self.exp.evaluate(symtable)
     }
 }
@@ -206,12 +211,15 @@ impl Stmt {
                     ValInfo::Const(_)=>{
                         panic!("should not assign to const")
                     },
-                    ValInfo::Var(v)=>{        
+                    ValInfo::Var(v,_)=>{        
                         let v = *v;  
                         let expval = exp.convert_to_koopa_ir(func_data, entry, symtable);              
                         let store = func_data.dfg_mut().new_value().store(expval, v);
                         let _ = func_data.layout_mut().bb_mut(entry).
                         insts_mut().push_key_back(store);
+                        let newval = exp.evaluate(symtable).unwrap().unwrap();
+                        // update the value for var
+                        symtable.insert(lval.ident.clone(), ValInfo::Var(v,Some(newval)));
                     }
                 }
             },
@@ -233,7 +241,7 @@ impl Exp {
         symtable: &mut HashMap<String, ValInfo>) -> Value {
         self.lorexp.convert_to_koopa_ir(func_data, entry, symtable)
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         self.lorexp.evaluate(symtable)
     }
 }
@@ -247,7 +255,7 @@ pub enum UnaryExp{
 impl UnaryExp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value {
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -272,15 +280,15 @@ impl UnaryExp {
             }
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             UnaryExp::Primary(primary) => primary.evaluate(symtable),
             UnaryExp::Unary(op, unary) => {
                 let val = unary.evaluate(symtable)?;
                 match op {
                     UnaryOp::Pos => Ok(val),
-                    UnaryOp::Neg => Ok(-val),
-                    UnaryOp::Not => Ok(if val == 0 { 1 } else { 0 }),
+                    UnaryOp::Neg => Ok(Some(-val.unwrap())),
+                    UnaryOp::Not => Ok(if val == Some(0) { Some(1) } else { Some(0) }),
                 }
             }
         }
@@ -318,9 +326,12 @@ impl PrimaryExp {
                     ValInfo::Const(c)=>{
                         func_data.dfg_mut().new_value().integer(*c)
                     },
-                    ValInfo::Var(v)=>{
+                    ValInfo::Var(v,val_opt)=>{
+                        // let integer = func_data.dfg_mut().new_value().integer(val_opt.unwrap());
+                        // let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(integer);
+                        // integer
                         let load = func_data.dfg_mut().new_value().load(*v);
-                        func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(load);
+                        let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(load);
                         load
                     }
                 }
@@ -328,7 +339,7 @@ impl PrimaryExp {
             PrimaryExp::Number(n) => func_data.dfg_mut().new_value().integer(*n),
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             PrimaryExp::Exp(exp) => exp.evaluate(symtable),
             PrimaryExp::LVal(lval) => {
@@ -336,14 +347,14 @@ impl PrimaryExp {
                 .expect(&format!("undefined variable: {}", lval.ident));
                 match val{
                     ValInfo::Const(c)=>{
-                        Ok(*c)
+                        Ok(Some(*c))
                     },
-                    ValInfo::Var(_)=>{
-                        Err("should not get var in evaluate")
+                    ValInfo::Var(v,i32_opt)=>{
+                        Ok(*i32_opt)
                     }
                 }
             },
-            PrimaryExp::Number(n) => Ok(*n),
+            PrimaryExp::Number(n) => Ok(Some(*n)),
         }
     }
 }
@@ -358,7 +369,7 @@ impl AddExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
         // 常量折叠
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -379,11 +390,13 @@ impl AddExp{
             }
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             AddExp::Mul(mul) => mul.evaluate(symtable),
-            AddExp::Add(add, mul) => Ok(add.evaluate(symtable)? + mul.evaluate(symtable)?),
-            AddExp::Sub(add, mul) => Ok(add.evaluate(symtable)? - mul.evaluate(symtable)?),
+            AddExp::Add(add, mul) => 
+            Ok(Some(add.evaluate(symtable)?.unwrap() + mul.evaluate(symtable)?.unwrap())),
+            AddExp::Sub(add, mul) => 
+            Ok(Some(add.evaluate(symtable)?.unwrap() - mul.evaluate(symtable)?.unwrap())),
         }
     }
 }
@@ -398,7 +411,7 @@ pub enum MulExp{
 impl MulExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -426,12 +439,15 @@ impl MulExp{
             }
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             MulExp::Unary(unaryexp) => unaryexp.evaluate(symtable),
-            MulExp::Mul(mul, unaryexp) => Ok(mul.evaluate(symtable)? * unaryexp.evaluate(symtable)?),
-            MulExp::Div(mul, unaryexp) => Ok(mul.evaluate(symtable)? / unaryexp.evaluate(symtable)?),
-            MulExp::Mod(mul, unaryexp) => Ok(mul.evaluate(symtable)? % unaryexp.evaluate(symtable)?),
+            MulExp::Mul(mul, unaryexp) => 
+            Ok(Some(mul.evaluate(symtable)?.unwrap() * unaryexp.evaluate(symtable)?.unwrap())),
+            MulExp::Div(mul, unaryexp) => 
+            Ok(Some(mul.evaluate(symtable)?.unwrap() / unaryexp.evaluate(symtable)?.unwrap())),
+            MulExp::Mod(mul, unaryexp) => 
+            Ok(Some(mul.evaluate(symtable)?.unwrap() % unaryexp.evaluate(symtable)?.unwrap())),
         }
     }
 }
@@ -447,7 +463,7 @@ pub enum RelExp{
 impl RelExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -482,13 +498,17 @@ impl RelExp{
             },
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             RelExp::Add(add) => add.evaluate(symtable),
-            RelExp::Lt(rel, add) => Ok((rel.evaluate(symtable)? < add.evaluate(symtable)?) as i32),
-            RelExp::Gt(rel, add) => Ok((rel.evaluate(symtable)? > add.evaluate(symtable)?) as i32),
-            RelExp::Le(rel, add) => Ok((rel.evaluate(symtable)? <= add.evaluate(symtable)?) as i32),
-            RelExp::Ge(rel, add) => Ok((rel.evaluate(symtable)? >= add.evaluate(symtable)?) as i32),
+            RelExp::Lt(rel, add) => 
+            Ok(Some((rel.evaluate(symtable)?.unwrap() < add.evaluate(symtable)?.unwrap()) as i32)),
+            RelExp::Gt(rel, add) => 
+            Ok(Some((rel.evaluate(symtable)?.unwrap() > add.evaluate(symtable)?.unwrap()) as i32)),
+            RelExp::Le(rel, add) => 
+            Ok(Some((rel.evaluate(symtable)?.unwrap() <= add.evaluate(symtable)?.unwrap()) as i32)),
+            RelExp::Ge(rel, add) => 
+            Ok(Some((rel.evaluate(symtable)?.unwrap() >= add.evaluate(symtable)?.unwrap()) as i32)),
         }
     }
 }
@@ -502,7 +522,7 @@ pub enum EqExp{
 impl EqExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -523,11 +543,13 @@ impl EqExp{
             },
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             EqExp::Rel(rel) => rel.evaluate(symtable),
-            EqExp::Eq(eq, rel) => Ok((eq.evaluate(symtable)? == rel.evaluate(symtable)?) as i32),
-            EqExp::Ne(eq, rel) => Ok((eq.evaluate(symtable)? != rel.evaluate(symtable)?) as i32),
+            EqExp::Eq(eq, rel) => 
+            Ok(Some((eq.evaluate(symtable)?.unwrap() == rel.evaluate(symtable)?.unwrap()) as i32)),
+            EqExp::Ne(eq, rel) => 
+            Ok(Some((eq.evaluate(symtable)?.unwrap() != rel.evaluate(symtable)?.unwrap()) as i32)),
         }
     }
 }
@@ -540,7 +562,7 @@ pub enum LAndExp{
 impl LAndExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -554,13 +576,13 @@ impl LAndExp{
             },
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             LAndExp::Eq(eq) => eq.evaluate(symtable),
             LAndExp::And(land, eq) => {
-                let l = land.evaluate(symtable)?;
-                let r = eq.evaluate(symtable)?;
-                Ok(if l != 0 && r != 0 { 1 } else { 0 })
+                let l = land.evaluate(symtable)?.unwrap();
+                let r = eq.evaluate(symtable)?.unwrap();
+                Ok(if l != 0 && r != 0 { Some(1) } else { Some(0) })
             }
         }
     }
@@ -574,7 +596,7 @@ pub enum LOrExp{
 impl LOrExp{
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(val) = self.evaluate(symtable) {
+        if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -588,13 +610,13 @@ impl LOrExp{
             },
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<i32, &'static str> {
+    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
         match self {
             LOrExp::And(land) => land.evaluate(symtable),
             LOrExp::Or(lor, land) => {
-                let l = lor.evaluate(symtable)?;
-                let r = land.evaluate(symtable)?;
-                Ok(if l != 0 || r != 0 { 1 } else { 0 })
+                let l = lor.evaluate(symtable)?.unwrap();
+                let r = land.evaluate(symtable)?.unwrap();
+                Ok(if l != 0 || r != 0 { Some(1) } else { Some(0) })
             }
         }
     }
