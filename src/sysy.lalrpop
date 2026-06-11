@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use crate::ast::{CompUnit,FuncDef,FuncType,Block,BlockItem
-,Decl,ConstDecl,BType,ConstDef,ConstInitVal,ConstExp
+,Decl,ConstDecl,BType,ConstDef,ConstInitVal,ConstExp,
+VarDecl,VarDef,InitVal
 ,Stmt,Exp,UnaryExp,UnaryOp,PrimaryExp,LVal,
 AddExp,MulExp,RelExp,EqExp,LAndExp,LOrExp};
 // lalrpop 里的约定
@@ -36,6 +37,7 @@ BlockItem: BlockItem = {
 
 Decl: Decl = {
     <const_decl: ConstDecl> => Decl::ConstDecl(const_decl),
+    <var_decl: VarDecl> => Decl::VarDecl(var_decl)
 }
 
 ConstDecl: ConstDecl = {
@@ -43,6 +45,25 @@ ConstDecl: ConstDecl = {
         let mut defs = vec![first];
         for (_, d) in rest { defs.push(d); }
         ConstDecl { btype, defs }
+    }
+}
+
+
+VarDef: VarDef = {
+    <ident: Ident> "=" <init_val: InitVal> 
+    => VarDef::IDENTInitVal (ident, init_val),
+    <ident: Ident> => VarDef::IDENT(ident)
+}
+
+InitVal: InitVal = {
+    <exp: Exp> => InitVal{exp},
+}
+
+VarDecl: VarDecl = {
+    <btype: BType> <first: VarDef> <rest: ("," VarDef)*> ";" => {
+        let mut defs = vec![first];
+        for (_, d) in rest { defs.push(d); }
+        VarDecl { btype, defs }
     }
 }
 
@@ -58,7 +79,10 @@ ConstInitVal: ConstInitVal = {
 
 ConstExp: ConstExp = <exp: Exp> => ConstExp { exp };
 
-Stmt: Stmt = "return" <exp: Exp> ";" => Stmt { <> };
+Stmt: Stmt = {
+  "return" <exp: Exp> ";" => Stmt::Return(<>),
+  <lval:LVal> "=" <exp:Exp> ";" => Stmt::Assign(lval, exp),
+}
 
 Exp: Exp = <lorexp: LOrExp> => Exp{ <> };
 
