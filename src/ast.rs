@@ -3,6 +3,63 @@ use std::collections::HashMap;
 use koopa::ir::*;
 use koopa::ir::builder_traits::*;
 
+/// 为二元表达式枚举统一生成 convert_to_koopa_ir 和 evaluate 方法。
+///
+/// 用法：
+/// ```ignore
+/// impl_binary_expr!(AddExp, leaf: Mul(MulExp),
+///     variants: [
+///         Add => BinaryOp::Add, eval: |l, r| l + r,
+///         Sub => BinaryOp::Sub, eval: |l, r| l - r,
+///     ]
+/// );
+/// ```
+/// `eval:` 后跟一个闭包 `|l, r| expr`，`l` / `r` 为已求值的 `i32`。
+macro_rules! impl_binary_expr {
+    (
+        $enum:ident, leaf: $leaf_variant:ident($leaf_ty:ty),
+        variants: [$(
+            $variant:ident => $binary_op:expr, eval: $eval_body:expr
+        ),* $(,)?]
+    ) => {
+        impl $enum {
+            fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
+                symtable: &mut HashMap<String, ValInfo>) -> Value {
+                if let Ok(Some(val)) = self.evaluate(symtable) {
+                    return func_data.dfg_mut().new_value().integer(val);
+                }
+                match self {
+                    Self::$leaf_variant(inner) => inner.convert_to_koopa_ir(func_data, entry, symtable),
+                    $(
+                        Self::$variant(lhs, rhs) => {
+                            let lhs = lhs.convert_to_koopa_ir(func_data, entry, symtable);
+                            let rhs = rhs.convert_to_koopa_ir(func_data, entry, symtable);
+                            let v = func_data.dfg_mut().new_value().binary($binary_op, lhs, rhs);
+                            let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
+                            v
+                        }
+                    )*
+                }
+            }
+
+            fn evaluate(&self, symtable: &HashMap<String, ValInfo>)
+                -> Result<Option<i32>, &'static str> {
+                match self {
+                    Self::$leaf_variant(inner) => inner.evaluate(symtable),
+                    $(
+                        Self::$variant(lhs, rhs) => {
+                            Ok(Some(($eval_body)(
+                                lhs.evaluate(symtable)?.unwrap(),
+                                rhs.evaluate(symtable)?.unwrap(),
+                            )))
+                        }
+                    )*
+                }
+            }
+        }
+    };
+}
+
 #[derive(Debug)]
 pub struct CompUnit {
   pub func_def: FuncDef,
@@ -30,20 +87,10 @@ pub enum ValInfo{
 }
 impl FuncDef {
     fn convert_to_koopa_ir(&mut self, program: &mut Program){
-        match self.func_type {
-            FuncType::Void => {
-                let name = format!("@{}", self.ident);
-                let func = program.new_func_def(name, vec![], Type::get_i32());
-                let func_data = program.func_mut(func);
-                self.block.convert_to_koopa_ir(func_data, &mut self.symtable);
-            },
-            FuncType::Int => {
-                let name = format!("@{}", self.ident);
-                let func = program.new_func_def(name, vec![], Type::get_i32());
-                let func_data = program.func_mut(func);
-                self.block.convert_to_koopa_ir(func_data, &mut self.symtable);
-            },
-        }
+        let name = format!("@{}", self.ident);
+        let func = program.new_func_def(name, vec![], Type::get_i32());
+        let func_data = program.func_mut(func);
+        self.block.convert_to_koopa_ir(func_data, &mut self.symtable);
     }
 }
 
@@ -365,41 +412,12 @@ pub enum AddExp{
     Add(Box<AddExp>, MulExp),
     Sub(Box<AddExp>, MulExp),
 }
-impl AddExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        // 常量折叠
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            AddExp::Mul(mul) => mul.convert_to_koopa_ir(func_data, entry, symtable),
-            AddExp::Add(add,mul ) =>{
-                let lhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = mul.convert_to_koopa_ir(func_data, entry, symtable);
-                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Add, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
-                eq
-            },
-            AddExp::Sub(add,mul ) =>{
-                let lhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = mul.convert_to_koopa_ir(func_data, entry, symtable);
-                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Sub, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
-                eq
-            }
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            AddExp::Mul(mul) => mul.evaluate(symtable),
-            AddExp::Add(add, mul) => 
-            Ok(Some(add.evaluate(symtable)?.unwrap() + mul.evaluate(symtable)?.unwrap())),
-            AddExp::Sub(add, mul) => 
-            Ok(Some(add.evaluate(symtable)?.unwrap() - mul.evaluate(symtable)?.unwrap())),
-        }
-    }
-}
+impl_binary_expr!(AddExp, leaf: Mul(MulExp),
+    variants: [
+        Add => BinaryOp::Add, eval: |l, r| l + r,
+        Sub => BinaryOp::Sub, eval: |l, r| l - r,
+    ]
+);
 
 #[derive(Debug)]
 pub enum MulExp{
@@ -408,49 +426,13 @@ pub enum MulExp{
     Div(Box<MulExp>, UnaryExp),
     Mod(Box<MulExp>, UnaryExp),
 }
-impl MulExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            MulExp::Unary(unaryexp) => unaryexp.convert_to_koopa_ir(func_data, entry, symtable),
-            MulExp::Mul(mul, unaryexp) => {
-                let lhs = mul.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry, symtable);
-                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Mul, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
-                eq
-            },
-            MulExp::Div(mul, unaryexp) => {
-                let lhs = mul.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry, symtable);
-                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Div, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
-                eq
-            },
-            MulExp::Mod(mul, unaryexp) => {
-                let lhs = mul.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = unaryexp.convert_to_koopa_ir(func_data, entry, symtable);
-                let eq = func_data.dfg_mut().new_value().binary(BinaryOp::Mod, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(eq);
-                eq
-            }
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            MulExp::Unary(unaryexp) => unaryexp.evaluate(symtable),
-            MulExp::Mul(mul, unaryexp) => 
-            Ok(Some(mul.evaluate(symtable)?.unwrap() * unaryexp.evaluate(symtable)?.unwrap())),
-            MulExp::Div(mul, unaryexp) => 
-            Ok(Some(mul.evaluate(symtable)?.unwrap() / unaryexp.evaluate(symtable)?.unwrap())),
-            MulExp::Mod(mul, unaryexp) => 
-            Ok(Some(mul.evaluate(symtable)?.unwrap() % unaryexp.evaluate(symtable)?.unwrap())),
-        }
-    }
-}
+impl_binary_expr!(MulExp, leaf: Unary(UnaryExp),
+    variants: [
+        Mul => BinaryOp::Mul, eval: |l, r| l * r,
+        Div => BinaryOp::Div, eval: |l, r| l / r,
+        Mod => BinaryOp::Mod, eval: |l, r| l % r,
+    ]
+);
 
 #[derive(Debug)]
 pub enum RelExp{
@@ -460,58 +442,14 @@ pub enum RelExp{
     Le(Box<RelExp>, AddExp),
     Ge(Box<RelExp>, AddExp),
 }
-impl RelExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            RelExp::Add(add) => add.convert_to_koopa_ir(func_data, entry, symtable),
-            RelExp::Lt(rel, add) => {
-                let lhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Lt, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-            RelExp::Gt(rel, add) => {
-                let lhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Gt, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-            RelExp::Le(rel, add) => {
-                let lhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Le, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-            RelExp::Ge(rel, add) => {
-                let lhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = add.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Ge, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            RelExp::Add(add) => add.evaluate(symtable),
-            RelExp::Lt(rel, add) => 
-            Ok(Some((rel.evaluate(symtable)?.unwrap() < add.evaluate(symtable)?.unwrap()) as i32)),
-            RelExp::Gt(rel, add) => 
-            Ok(Some((rel.evaluate(symtable)?.unwrap() > add.evaluate(symtable)?.unwrap()) as i32)),
-            RelExp::Le(rel, add) => 
-            Ok(Some((rel.evaluate(symtable)?.unwrap() <= add.evaluate(symtable)?.unwrap()) as i32)),
-            RelExp::Ge(rel, add) => 
-            Ok(Some((rel.evaluate(symtable)?.unwrap() >= add.evaluate(symtable)?.unwrap()) as i32)),
-        }
-    }
-}
+impl_binary_expr!(RelExp, leaf: Add(AddExp),
+    variants: [
+        Lt => BinaryOp::Lt, eval: |l, r| (l < r) as i32,
+        Gt => BinaryOp::Gt, eval: |l, r| (l > r) as i32,
+        Le => BinaryOp::Le, eval: |l, r| (l <= r) as i32,
+        Ge => BinaryOp::Ge, eval: |l, r| (l >= r) as i32,
+    ]
+);
 
 #[derive(Debug)]
 pub enum EqExp{
@@ -519,105 +457,33 @@ pub enum EqExp{
     Eq(Box<EqExp>, RelExp),
     Ne(Box<EqExp>, RelExp),
 }
-impl EqExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            EqExp::Rel(rel) => rel.convert_to_koopa_ir(func_data, entry, symtable),
-            EqExp::Eq(eq, rel) => {
-                let lhs = eq.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Eq, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-            EqExp::Ne(eq, rel) => {
-                let lhs = eq.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = rel.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::NotEq, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            EqExp::Rel(rel) => rel.evaluate(symtable),
-            EqExp::Eq(eq, rel) => 
-            Ok(Some((eq.evaluate(symtable)?.unwrap() == rel.evaluate(symtable)?.unwrap()) as i32)),
-            EqExp::Ne(eq, rel) => 
-            Ok(Some((eq.evaluate(symtable)?.unwrap() != rel.evaluate(symtable)?.unwrap()) as i32)),
-        }
-    }
-}
+impl_binary_expr!(EqExp, leaf: Rel(RelExp),
+    variants: [
+        Eq => BinaryOp::Eq, eval: |l, r| (l == r) as i32,
+        Ne => BinaryOp::NotEq, eval: |l, r| (l != r) as i32,
+    ]
+);
 
 #[derive(Debug)]
 pub enum LAndExp{
     Eq(EqExp),
     And(Box<LAndExp>, EqExp),
 }
-impl LAndExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            LAndExp::Eq(eq) => eq.convert_to_koopa_ir(func_data, entry, symtable),
-            LAndExp::And(land, eq) => {
-                let lhs = land.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = eq.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::And, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            LAndExp::Eq(eq) => eq.evaluate(symtable),
-            LAndExp::And(land, eq) => {
-                let l = land.evaluate(symtable)?.unwrap();
-                let r = eq.evaluate(symtable)?.unwrap();
-                Ok(if l != 0 && r != 0 { Some(1) } else { Some(0) })
-            }
-        }
-    }
-}
+impl_binary_expr!(LAndExp, leaf: Eq(EqExp),
+    variants: [
+        And => BinaryOp::And,
+            eval: |l, r| if l != 0 && r != 0 { 1 } else { 0 },
+    ]
+);
 
 #[derive(Debug)]
 pub enum LOrExp{
     And(LAndExp),
     Or(Box<LOrExp>, LAndExp),
 }
-impl LOrExp{
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value{
-        if let Ok(Some(val)) = self.evaluate(symtable) {
-            return func_data.dfg_mut().new_value().integer(val);
-        }
-        match self {
-            LOrExp::And(land) => land.convert_to_koopa_ir(func_data, entry, symtable),
-            LOrExp::Or(lor, land) => {
-                let lhs = lor.convert_to_koopa_ir(func_data, entry, symtable);
-                let rhs = land.convert_to_koopa_ir(func_data, entry, symtable);
-                let v = func_data.dfg_mut().new_value().binary(BinaryOp::Or, lhs, rhs);
-                let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
-                v
-            },
-        }
-    }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
-        match self {
-            LOrExp::And(land) => land.evaluate(symtable),
-            LOrExp::Or(lor, land) => {
-                let l = lor.evaluate(symtable)?.unwrap();
-                let r = land.evaluate(symtable)?.unwrap();
-                Ok(if l != 0 || r != 0 { Some(1) } else { Some(0) })
-            }
-        }
-    }
-}
+impl_binary_expr!(LOrExp, leaf: And(LAndExp),
+    variants: [
+        Or => BinaryOp::Or,
+            eval: |l, r| if l != 0 || r != 0 { 1 } else { 0 },
+    ]
+);
