@@ -1,9 +1,8 @@
-use std::collections::HashMap;
 use crate::ast::{CompUnit,FuncDef,FuncType,Block,BlockItem
 ,Decl,ConstDecl,BType,ConstDef,ConstInitVal,ConstExp,
 VarDecl,VarDef,InitVal
 ,Stmt,Exp,UnaryExp,UnaryOp,PrimaryExp,LVal,
-AddExp,MulExp,RelExp,EqExp,LAndExp,LOrExp};
+AddExp,MulExp,RelExp,EqExp,LAndExp,LOrExp,SymTable};
 // lalrpop 里的约定
 grammar;
 
@@ -20,7 +19,7 @@ pub CompUnit: CompUnit = <func_def: FuncDef> => CompUnit { <> };
 
 FuncDef: FuncDef = {
   <func_type: FuncType> <ident: Ident> "(" ")" <block: Block> => {
-    FuncDef { func_type, ident, block, symtable: HashMap::new() }
+    FuncDef { func_type, ident, block, symtable: SymTable::new() }
   }
 }
 
@@ -82,6 +81,8 @@ ConstExp: ConstExp = <exp: Exp> => ConstExp { exp };
 Stmt: Stmt = {
   "return" <exp: Exp> ";" => Stmt::Return(<>),
   <lval:LVal> "=" <exp:Exp> ";" => Stmt::Assign(lval, exp),
+  <exp: Exp?> ";" => Stmt::ExprStmt(exp),
+  <block: Block> => Stmt::Block(block),
 }
 
 Exp: Exp = <lorexp: LOrExp> => Exp{ <> };

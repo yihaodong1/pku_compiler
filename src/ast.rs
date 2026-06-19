@@ -3,6 +3,63 @@ use std::collections::HashMap;
 use koopa::ir::*;
 use koopa::ir::builder_traits::*;
 
+/// 支持作用域嵌套的符号表。
+///
+/// 内部维护一个 `Vec<HashMap<...>>`，栈顶（最后元素）为当前作用域。
+/// - `insert` 只在当前作用域插入。
+/// - `get` 从当前作用域向外逐层查找。
+/// - `push_scope` / `pop_scope` 在进入/退出代码块时调用。
+#[derive(Debug)]
+pub struct SymTable {
+    scopes: Vec<HashMap<String, ValInfo>>,
+}
+
+impl SymTable {
+    pub fn new() -> Self {
+        SymTable { scopes: vec![HashMap::new()] }
+    }
+
+    /// 进入代码块时调用，新建一层作用域。
+    pub fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    /// 退出代码块时调用，销毁最内层作用域。
+    pub fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    /// 在当前作用域插入符号。若当前作用域已存在同名符号则 panic。
+    pub fn insert(&mut self, key: String, val: ValInfo) {
+        let cur = self.scopes.last_mut().unwrap();
+        if cur.contains_key(&key) {
+            println!("{:#?}",self.scopes);
+            panic!("redefined symbol: {}", key);
+        }
+        cur.insert(key, val);
+    }
+
+    /// 跨作用域查找符号。从当前作用域向外逐层查找，找不到返回 `None`。
+    pub fn get(&self, key: &str) -> Option<&ValInfo> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(v) = scope.get(key) {
+                return Some(v);
+            }
+        }
+        None
+    }
+
+    /// 跨作用域可变查找符号。用于赋值时原地更新缓存值。
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut ValInfo> {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(v) = scope.get_mut(key) {
+                return Some(v);
+            }
+        }
+        None
+    }
+}
+
 /// 为二元表达式枚举统一生成 convert_to_koopa_ir 和 evaluate 方法。
 ///
 /// 用法：
@@ -24,7 +81,7 @@ macro_rules! impl_binary_expr {
     ) => {
         impl $enum {
             fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-                symtable: &mut HashMap<String, ValInfo>) -> Value {
+                symtable: &mut SymTable) -> Value {
                 if let Ok(Some(val)) = self.evaluate(symtable) {
                     return func_data.dfg_mut().new_value().integer(val);
                 }
@@ -42,7 +99,7 @@ macro_rules! impl_binary_expr {
                 }
             }
 
-            fn evaluate(&self, symtable: &HashMap<String, ValInfo>)
+            fn evaluate(&self, symtable: &SymTable)
                 -> Result<Option<i32>, &'static str> {
                 match self {
                     Self::$leaf_variant(inner) => inner.evaluate(symtable),
@@ -78,7 +135,7 @@ pub struct FuncDef {
   pub func_type: FuncType,
   pub ident: String,
   pub block: Block,
-  pub symtable: HashMap<String, ValInfo>,
+  pub symtable: SymTable,
 }
 #[derive(Debug)]
 pub enum ValInfo{
@@ -90,7 +147,9 @@ impl FuncDef {
         let name = format!("@{}", self.ident);
         let func = program.new_func_def(name, vec![], Type::get_i32());
         let func_data = program.func_mut(func);
-        self.block.convert_to_koopa_ir(func_data, &mut self.symtable);
+        let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
+        let _ = func_data.layout_mut().bbs_mut().push_key_back(entry);
+        self.block.convert_to_koopa_ir(func_data, entry, &mut self.symtable);
     }
 }
 
@@ -105,16 +164,16 @@ pub struct Block {
   pub items: Vec<BlockItem>,
 }
 impl Block {
-    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, 
-        symtable: &mut HashMap<String, ValInfo>){
-        let entry = func_data.dfg_mut().new_bb().basic_block(Some("%entry".into()));
-        let _ = func_data.layout_mut().bbs_mut().push_key_back(entry);
+    fn convert_to_koopa_ir(&self, func_data: &mut FunctionData,
+        entry:BasicBlock, symtable: &mut SymTable){
+        symtable.push_scope();
         for item in &self.items {
             match item {
                 BlockItem::Decl(decl) => decl.convert_to_koopa_ir(func_data, entry, symtable),
                 BlockItem::Stmt(stmt) => stmt.convert_to_koopa_ir(func_data, entry, symtable),
             }
         }
+        symtable.pop_scope();
     }
 }
 
@@ -131,7 +190,7 @@ pub enum Decl {
 }
 impl Decl {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: koopa::ir::BasicBlock,
-         symtable: &mut HashMap<String, ValInfo>) {
+         symtable: &mut SymTable) {
         match self {
             Decl::ConstDecl(cd) => cd.convert_to_koopa_ir(symtable),
             Decl::VarDecl(vd)=> vd.convert_to_koopa_ir(func_data, entry, symtable),
@@ -150,7 +209,7 @@ pub struct ConstDecl {
     pub defs: Vec<ConstDef>,
 }
 impl ConstDecl {
-    fn convert_to_koopa_ir(&self, symtable: &mut HashMap<String, ValInfo>) {
+    fn convert_to_koopa_ir(&self, symtable: &mut SymTable) {
         for def in &self.defs {
             let val = def.init_val.evaluate(symtable);
             symtable.insert(def.ident.clone(), ValInfo::Const(val.unwrap().unwrap()));
@@ -169,7 +228,7 @@ pub enum ConstInitVal {
     Exp(ConstExp),
 }
 impl ConstInitVal {
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) 
+    fn evaluate(&self, symtable: &SymTable) 
     -> Result<Option<i32>, &'static str> {
         match self {
             ConstInitVal::Exp(exp) => exp.evaluate(symtable),
@@ -182,7 +241,7 @@ pub struct ConstExp {
     pub exp: Exp,
 }
 impl ConstExp {
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) 
+    fn evaluate(&self, symtable: &SymTable) 
     -> Result<Option<i32>, &'static str> {
         self.exp.evaluate(symtable)
     }
@@ -194,7 +253,7 @@ pub struct VarDecl {
 }
 impl VarDecl {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: koopa::ir::BasicBlock, 
-        symtable: &mut HashMap<String, ValInfo>) {
+        symtable: &mut SymTable) {
         for def in &self.defs {
             let ty = match self.btype{
                 BType::Int=>Type::get_i32()
@@ -204,11 +263,8 @@ impl VarDecl {
             
             match def{
                 VarDef::IDENT(name)=>{
-                    if symtable.get(name).is_none(){
-                        symtable.insert(name.clone(), ValInfo::Var(alloc,None));
-                    }else{
-                        panic!("repeat declare");
-                    }
+                    // SymTable::insert 只在当前作用域检查重定义
+                    symtable.insert(name.clone(), ValInfo::Var(alloc,None));
                 },
                 VarDef::IDENTInitVal(name,initval )=>{
                     let val = initval.evaluate(symtable).unwrap().unwrap();
@@ -216,11 +272,7 @@ impl VarDecl {
                     let store = func_data.dfg_mut().new_value().store(value, alloc);
                     let _ = func_data.layout_mut().bb_mut(entry).
                         insts_mut().push_key_back(store);
-                    if symtable.get(name).is_none(){
-                        symtable.insert(name.clone(), ValInfo::Var(alloc,Some(val)));
-                    }else{
-                        panic!("repeat declare");
-                    }
+                    symtable.insert(name.clone(), ValInfo::Var(alloc,Some(val)));
                 }
             }
         }
@@ -238,7 +290,7 @@ pub struct InitVal {
     pub exp: Exp,
 }
 impl InitVal {
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
         self.exp.evaluate(symtable)
     }
 }
@@ -246,34 +298,44 @@ impl InitVal {
 #[derive(Debug)]
 pub enum Stmt {
   Return(Exp),
-  Assign(LVal, Exp)
+  Assign(LVal, Exp),
+  ExprStmt(Option<Exp>),
+  Block(Block),
 }
 impl Stmt {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: koopa::ir::BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>){
+        symtable: &mut SymTable){
         match self{
             Stmt::Assign(lval,exp )=>{
-                let v = symtable.get(&lval.ident).unwrap();
-                match v{
-                    ValInfo::Const(_)=>{
-                        panic!("should not assign to const")
-                    },
-                    ValInfo::Var(v,_)=>{        
-                        let v = *v;  
-                        let expval = exp.convert_to_koopa_ir(func_data, entry, symtable);              
-                        let store = func_data.dfg_mut().new_value().store(expval, v);
-                        let _ = func_data.layout_mut().bb_mut(entry).
-                        insts_mut().push_key_back(store);
-                        let newval = exp.evaluate(symtable).unwrap().unwrap();
-                        // update the value for var
-                        symtable.insert(lval.ident.clone(), ValInfo::Var(v,Some(newval)));
-                    }
+                // 先取出 alloc handle，避免后续 get_mut 的借用冲突
+                let alloc = match symtable.get(&lval.ident).unwrap() {
+                    ValInfo::Const(_) => panic!("should not assign to const"),
+                    ValInfo::Var(v, _) => *v,
+                };
+                let expval = exp.convert_to_koopa_ir(func_data, entry, symtable);
+                let store = func_data.dfg_mut().new_value().store(expval, alloc);
+                let _ = func_data.layout_mut().bb_mut(entry).
+                    insts_mut().push_key_back(store);
+                let newval = exp.evaluate(symtable).unwrap().unwrap();
+                // 跨作用域原地更新缓存值，不 insert（避免在错误的作用域创建影子条目）
+                let info = symtable.get_mut(&lval.ident).unwrap();
+                if let ValInfo::Var(_, ref mut cached) = info {
+                    *cached = Some(newval);
                 }
             },
             Stmt::Return(exp)=>{
                 let value = exp.convert_to_koopa_ir(func_data, entry, symtable);
                 let ret = func_data.dfg_mut().new_value().ret(Some(value));
                 let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(ret);
+            },
+            Stmt::ExprStmt(exp_opt)=>{
+                // [Exp] ";" — 只有表达式的语句
+                if let Some(exp) = exp_opt {
+                    exp.convert_to_koopa_ir(func_data, entry, symtable);
+                }
+            },
+            Stmt::Block(block)=>{
+                block.convert_to_koopa_ir(func_data, entry, symtable);
             }
         }
     }
@@ -285,10 +347,10 @@ pub struct Exp{
 }
 impl Exp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value {
+        symtable: &mut SymTable) -> Value {
         self.lorexp.convert_to_koopa_ir(func_data, entry, symtable)
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
         self.lorexp.evaluate(symtable)
     }
 }
@@ -301,7 +363,7 @@ pub enum UnaryExp{
 }
 impl UnaryExp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value {
+        symtable: &mut SymTable) -> Value {
         if let Ok(Some(val)) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
@@ -327,7 +389,7 @@ impl UnaryExp {
             }
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
         match self {
             UnaryExp::Primary(primary) => primary.evaluate(symtable),
             UnaryExp::Unary(op, unary) => {
@@ -362,7 +424,7 @@ pub enum PrimaryExp{
 }
 impl PrimaryExp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
-        symtable: &mut HashMap<String, ValInfo>) -> Value {
+        symtable: &mut SymTable) -> Value {
         match self {
             PrimaryExp::Exp(exp) => exp.convert_to_koopa_ir(func_data, entry, symtable),
             PrimaryExp::LVal(lval) => {
@@ -386,7 +448,7 @@ impl PrimaryExp {
             PrimaryExp::Number(n) => func_data.dfg_mut().new_value().integer(*n),
         }
     }
-    fn evaluate(&self, symtable: &HashMap<String, ValInfo>) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
         match self {
             PrimaryExp::Exp(exp) => exp.evaluate(symtable),
             PrimaryExp::LVal(lval) => {
