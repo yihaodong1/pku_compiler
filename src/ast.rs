@@ -3,20 +3,30 @@ use std::collections::HashMap;
 use koopa::ir::*;
 use koopa::ir::builder_traits::*;
 
+/// 作用域中的条目：要么是编译期常量，要么是运行时变量（存 alloc handle）。
+#[derive(Debug)]
+pub enum ScopeEntry {
+    Const(i32),
+    Var(Value),
+}
+
 /// 支持作用域嵌套的符号表。
 ///
-/// 内部维护一个 `Vec<HashMap<...>>`，栈顶（最后元素）为当前作用域。
-/// - `insert` 只在当前作用域插入。
-/// - `get` 从当前作用域向外逐层查找。
-/// - `push_scope` / `pop_scope` 在进入/退出代码块时调用。
+/// - `scopes`：名字 → 条目，栈顶为当前作用域。管"名字可见性"。
+/// - `value_cache`：`Value` handle → 已知的编译期值。管"值缓存"。
+///   与作用域无关——`Value` handle 全局唯一，无论变量还是中间表达式结果都能缓存。
 #[derive(Debug)]
 pub struct SymTable {
-    scopes: Vec<HashMap<String, ValInfo>>,
+    scopes: Vec<HashMap<String, ScopeEntry>>,
+    pub value_cache: HashMap<Value, i32>,
 }
 
 impl SymTable {
     pub fn new() -> Self {
-        SymTable { scopes: vec![HashMap::new()] }
+        SymTable {
+            scopes: vec![HashMap::new()],
+            value_cache: HashMap::new(),
+        }
     }
 
     /// 进入代码块时调用，新建一层作用域。
@@ -30,29 +40,18 @@ impl SymTable {
     }
 
     /// 在当前作用域插入符号。若当前作用域已存在同名符号则 panic。
-    pub fn insert(&mut self, key: String, val: ValInfo) {
+    pub fn insert(&mut self, key: String, entry: ScopeEntry) {
         let cur = self.scopes.last_mut().unwrap();
         if cur.contains_key(&key) {
-            println!("{:#?}",self.scopes);
             panic!("redefined symbol: {}", key);
         }
-        cur.insert(key, val);
+        cur.insert(key, entry);
     }
 
     /// 跨作用域查找符号。从当前作用域向外逐层查找，找不到返回 `None`。
-    pub fn get(&self, key: &str) -> Option<&ValInfo> {
+    pub fn get(&self, key: &str) -> Option<&ScopeEntry> {
         for scope in self.scopes.iter().rev() {
             if let Some(v) = scope.get(key) {
-                return Some(v);
-            }
-        }
-        None
-    }
-
-    /// 跨作用域可变查找符号。用于赋值时原地更新缓存值。
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut ValInfo> {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(v) = scope.get_mut(key) {
                 return Some(v);
             }
         }
@@ -82,16 +81,16 @@ macro_rules! impl_binary_expr {
         impl $enum {
             fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
                 symtable: &mut SymTable) -> Value {
-                if let Ok(Some(val)) = self.evaluate(symtable) {
+                if let Some(val) = self.evaluate(symtable) {
                     return func_data.dfg_mut().new_value().integer(val);
                 }
                 match self {
                     Self::$leaf_variant(inner) => inner.convert_to_koopa_ir(func_data, entry, symtable),
                     $(
                         Self::$variant(lhs, rhs) => {
-                            let lhs = lhs.convert_to_koopa_ir(func_data, entry, symtable);
-                            let rhs = rhs.convert_to_koopa_ir(func_data, entry, symtable);
-                            let v = func_data.dfg_mut().new_value().binary($binary_op, lhs, rhs);
+                            let lv = lhs.convert_to_koopa_ir(func_data, entry, symtable);
+                            let rv = rhs.convert_to_koopa_ir(func_data, entry, symtable);
+                            let v = func_data.dfg_mut().new_value().binary($binary_op, lv, rv);
                             let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(v);
                             v
                         }
@@ -99,16 +98,14 @@ macro_rules! impl_binary_expr {
                 }
             }
 
-            fn evaluate(&self, symtable: &SymTable)
-                -> Result<Option<i32>, &'static str> {
+            fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
                 match self {
                     Self::$leaf_variant(inner) => inner.evaluate(symtable),
                     $(
                         Self::$variant(lhs, rhs) => {
-                            Ok(Some(($eval_body)(
-                                lhs.evaluate(symtable)?.unwrap(),
-                                rhs.evaluate(symtable)?.unwrap(),
-                            )))
+                            let l = lhs.evaluate(symtable)?;
+                            let r = rhs.evaluate(symtable)?;
+                            Some(($eval_body)(l, r))
                         }
                     )*
                 }
@@ -136,11 +133,6 @@ pub struct FuncDef {
   pub ident: String,
   pub block: Block,
   pub symtable: SymTable,
-}
-#[derive(Debug)]
-pub enum ValInfo{
-    Const(i32),
-    Var(Value, Option<i32>)
 }
 impl FuncDef {
     fn convert_to_koopa_ir(&mut self, program: &mut Program){
@@ -211,8 +203,8 @@ pub struct ConstDecl {
 impl ConstDecl {
     fn convert_to_koopa_ir(&self, symtable: &mut SymTable) {
         for def in &self.defs {
-            let val = def.init_val.evaluate(symtable);
-            symtable.insert(def.ident.clone(), ValInfo::Const(val.unwrap().unwrap()));
+            let val = def.init_val.evaluate(symtable).unwrap();
+            symtable.insert(def.ident.clone(), ScopeEntry::Const(val));
         }
     }
 }
@@ -228,8 +220,7 @@ pub enum ConstInitVal {
     Exp(ConstExp),
 }
 impl ConstInitVal {
-    fn evaluate(&self, symtable: &SymTable) 
-    -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         match self {
             ConstInitVal::Exp(exp) => exp.evaluate(symtable),
         }
@@ -241,8 +232,7 @@ pub struct ConstExp {
     pub exp: Exp,
 }
 impl ConstExp {
-    fn evaluate(&self, symtable: &SymTable) 
-    -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         self.exp.evaluate(symtable)
     }
 }
@@ -263,16 +253,16 @@ impl VarDecl {
             
             match def{
                 VarDef::IDENT(name)=>{
-                    // SymTable::insert 只在当前作用域检查重定义
-                    symtable.insert(name.clone(), ValInfo::Var(alloc,None));
+                    symtable.insert(name.clone(), ScopeEntry::Var(alloc));
                 },
                 VarDef::IDENTInitVal(name,initval )=>{
-                    let val = initval.evaluate(symtable).unwrap().unwrap();
+                    let val = initval.evaluate(symtable).unwrap();
                     let value = func_data.dfg_mut().new_value().integer(val);
                     let store = func_data.dfg_mut().new_value().store(value, alloc);
                     let _ = func_data.layout_mut().bb_mut(entry).
                         insts_mut().push_key_back(store);
-                    symtable.insert(name.clone(), ValInfo::Var(alloc,Some(val)));
+                    symtable.insert(name.clone(), ScopeEntry::Var(alloc));
+                    symtable.value_cache.insert(alloc, val);
                 }
             }
         }
@@ -290,7 +280,7 @@ pub struct InitVal {
     pub exp: Exp,
 }
 impl InitVal {
-    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         self.exp.evaluate(symtable)
     }
 }
@@ -307,20 +297,17 @@ impl Stmt {
         symtable: &mut SymTable){
         match self{
             Stmt::Assign(lval,exp )=>{
-                // 先取出 alloc handle，避免后续 get_mut 的借用冲突
                 let alloc = match symtable.get(&lval.ident).unwrap() {
-                    ValInfo::Const(_) => panic!("should not assign to const"),
-                    ValInfo::Var(v, _) => *v,
+                    ScopeEntry::Const(_) => panic!("should not assign to const"),
+                    ScopeEntry::Var(v) => *v,
                 };
                 let expval = exp.convert_to_koopa_ir(func_data, entry, symtable);
                 let store = func_data.dfg_mut().new_value().store(expval, alloc);
                 let _ = func_data.layout_mut().bb_mut(entry).
                     insts_mut().push_key_back(store);
-                let newval = exp.evaluate(symtable).unwrap().unwrap();
-                // 跨作用域原地更新缓存值，不 insert（避免在错误的作用域创建影子条目）
-                let info = symtable.get_mut(&lval.ident).unwrap();
-                if let ValInfo::Var(_, ref mut cached) = info {
-                    *cached = Some(newval);
+                // 尝试编译期求值并更新缓存
+                if let Some(newval) = exp.evaluate(symtable) {
+                    symtable.value_cache.insert(alloc, newval);
                 }
             },
             Stmt::Return(exp)=>{
@@ -350,7 +337,7 @@ impl Exp {
         symtable: &mut SymTable) -> Value {
         self.lorexp.convert_to_koopa_ir(func_data, entry, symtable)
     }
-    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         self.lorexp.evaluate(symtable)
     }
 }
@@ -364,7 +351,7 @@ pub enum UnaryExp{
 impl UnaryExp {
     fn convert_to_koopa_ir(&self, func_data: &mut FunctionData, entry: BasicBlock,
         symtable: &mut SymTable) -> Value {
-        if let Ok(Some(val)) = self.evaluate(symtable) {
+        if let Some(val) = self.evaluate(symtable) {
             return func_data.dfg_mut().new_value().integer(val);
         }
         match self {
@@ -372,7 +359,7 @@ impl UnaryExp {
             UnaryExp::Unary(op, unary) => {
                 let val = unary.convert_to_koopa_ir(func_data, entry, symtable);
                 match op {
-                    UnaryOp::Pos => val,
+                    UnaryOp::Pos => val,  // 恒等，handle 不变，不需要额外缓存
                     UnaryOp::Neg => {
                         let zero = func_data.dfg_mut().new_value().integer(0);
                         let sub = func_data.dfg_mut().new_value().binary(BinaryOp::Sub, zero, val);
@@ -389,15 +376,15 @@ impl UnaryExp {
             }
         }
     }
-    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         match self {
             UnaryExp::Primary(primary) => primary.evaluate(symtable),
             UnaryExp::Unary(op, unary) => {
                 let val = unary.evaluate(symtable)?;
                 match op {
-                    UnaryOp::Pos => Ok(val),
-                    UnaryOp::Neg => Ok(Some(-val.unwrap())),
-                    UnaryOp::Not => Ok(if val == Some(0) { Some(1) } else { Some(0) }),
+                    UnaryOp::Pos => Some(val),
+                    UnaryOp::Neg => Some(-val),
+                    UnaryOp::Not => Some(if val == 0 { 1 } else { 0 }),
                 }
             }
         }
@@ -428,42 +415,47 @@ impl PrimaryExp {
         match self {
             PrimaryExp::Exp(exp) => exp.convert_to_koopa_ir(func_data, entry, symtable),
             PrimaryExp::LVal(lval) => {
-                // 查符号表获取常量值
-                let val = symtable.get(&lval.ident)
+                let entry_s = symtable.get(&lval.ident)
                     .expect(&format!("undefined variable: {}", lval.ident));
-                match val{
-                    ValInfo::Const(c)=>{
-                        func_data.dfg_mut().new_value().integer(*c)
+                match entry_s {
+                    ScopeEntry::Const(c) => {
+                        let v = func_data.dfg_mut().new_value().integer(*c);
+                        symtable.value_cache.insert(v, *c);
+                        v
                     },
-                    ValInfo::Var(v,val_opt)=>{
-                        // let integer = func_data.dfg_mut().new_value().integer(val_opt.unwrap());
-                        // let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(integer);
-                        // integer
-                        let load = func_data.dfg_mut().new_value().load(*v);
-                        let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(load);
-                        load
+                    ScopeEntry::Var(alloc) => {
+                        // 有缓存值就用整数常量，否则生成 load
+                        if let Some(cached) = symtable.value_cache.get(alloc) {
+                            let v = func_data.dfg_mut().new_value().integer(*cached);
+                            symtable.value_cache.insert(v, *cached);
+                            v
+                        } else {
+                            let load = func_data.dfg_mut().new_value().load(*alloc);
+                            let _ = func_data.layout_mut().bb_mut(entry).insts_mut().push_key_back(load);
+                            load
+                        }
                     }
                 }
             },
-            PrimaryExp::Number(n) => func_data.dfg_mut().new_value().integer(*n),
+            PrimaryExp::Number(n) => {
+                let v = func_data.dfg_mut().new_value().integer(*n);
+                symtable.value_cache.insert(v, *n);
+                v
+            },
         }
     }
-    fn evaluate(&self, symtable: &SymTable) -> Result<Option<i32>, &'static str> {
+    fn evaluate(&self, symtable: &SymTable) -> Option<i32> {
         match self {
             PrimaryExp::Exp(exp) => exp.evaluate(symtable),
             PrimaryExp::LVal(lval) => {
-                let val =  symtable.get(&lval.ident)
-                .expect(&format!("undefined variable: {}", lval.ident));
-                match val{
-                    ValInfo::Const(c)=>{
-                        Ok(Some(*c))
-                    },
-                    ValInfo::Var(v,i32_opt)=>{
-                        Ok(*i32_opt)
-                    }
+                let entry_s = symtable.get(&lval.ident)
+                    .expect(&format!("undefined variable: {}", lval.ident));
+                match entry_s {
+                    ScopeEntry::Const(c) => Some(*c),
+                    ScopeEntry::Var(alloc) => symtable.value_cache.get(alloc).copied(),
                 }
             },
-            PrimaryExp::Number(n) => Ok(Some(*n)),
+            PrimaryExp::Number(n) => Some(*n),
         }
     }
 }
